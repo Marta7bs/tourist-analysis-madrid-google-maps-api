@@ -87,5 +87,5 @@ This project aims to answer questions such as:
 
 ## Author
 
-Marta Benito
+Marta B
 Data & AI Engineer
