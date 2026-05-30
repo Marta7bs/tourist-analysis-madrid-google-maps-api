@@ -1,0 +1,175 @@
+import requests
+import pandas as pd
+import time
+import os
+
+
+API_KEY = "" # tu api key aquí
+FILE_NAME = "madrid_turismo.csv"
+url_search = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+url_details = "https://maps.googleapis.com/maps/api/place/details/json"
+
+
+
+# queries de activiad turística
+
+base_queries = [
+    "tourist attractions",
+    "things to do",
+    "restaurants",
+    "best restaurants",
+    "tapas",
+    "bars",
+    "cocktail bars",
+    "cafes",
+    "brunch",
+    "museums",
+    "art museums",
+    "hotels",
+    "hostels"
+]
+
+# queries de zona
+
+zones = [
+    "Madrid center",
+    "Malasaña Madrid",
+    "Chueca Madrid",
+    "Salamanca Madrid",
+    "Lavapiés Madrid",
+    "La Latina Madrid",
+    "Chamartín Madrid",
+    "Retiro Madrid"
+]
+
+# combinación de actividades turísticas + zonas
+queries = [f"{q} {z}" for q in base_queries for z in zones]
+
+# cargar dataset existente
+
+if os.path.exists(FILE_NAME):
+    existing_df = pd.read_csv(FILE_NAME)
+    existing_ids = set(existing_df["place_id"])
+    print(f"Dataset existente: {len(existing_df)} registros")
+else:
+    existing_df = pd.DataFrame()
+    existing_ids = set()
+    print("No hay dataset previo")
+
+# incorporar nuevos lugares al dataset (carga incremental)
+
+new_places = []
+seen_ids = set()
+
+MAX_NEW = 500  # límite por ejecución
+
+print("Buscando nuevos lugares...")
+
+for query in queries:
+
+    if len(new_places) >= MAX_NEW:
+        break
+
+    params = {"query": query, "key": API_KEY}
+
+    while True:
+        # llamada a API
+        try:
+            response = requests.get(url_search, params=params)
+            response.raise_for_status()
+            data = response.json()
+        # gestión de errores
+        except requests.exceptions.RequestException as e:
+            print(f"Error en búsqueda ({query}): {e}")
+            break
+
+        for place in data.get("results", []):
+            place_id = place["place_id"]
+
+            # control para no incluir lugares duplicados
+            if place_id in seen_ids or place_id in existing_ids:
+                continue
+
+            seen_ids.add(place_id)
+
+            new_places.append({
+                "place_id": place_id,
+                "name": place.get("name"),
+                "rating": place.get("rating"),
+                "reviews_count": place.get("user_ratings_total"),
+                "lat": place["geometry"]["location"]["lat"],
+                "lng": place["geometry"]["location"]["lng"],
+                "types": ", ".join(place.get("types", [])),
+                "query": query 
+            })
+
+            if len(new_places) >= MAX_NEW:
+                break
+
+        print(f"{query}: nuevos acumulados -> {len(new_places)}")
+
+        if len(new_places) >= MAX_NEW:
+            break
+
+        next_page_token = data.get("next_page_token")
+
+        if not next_page_token:
+            break
+
+        time.sleep(2)
+
+        params = {"pagetoken": next_page_token, "key": API_KEY}
+
+    time.sleep(0.5)
+
+# llamadas a la API para obtener place details (datos de precio)
+print(f"Enriqueciendo {len(new_places)} nuevos lugares...")
+
+prices = []
+
+for place in new_places:
+
+    params = {
+        "place_id": place["place_id"],
+        "fields": "price_level",
+        "key": API_KEY
+    }
+
+    success = False
+
+    for attempt in range(3): # máximo de 3 intentos
+        # llamada a API
+        try:
+            response = requests.get(url_details, params=params, timeout=10)
+            response.raise_for_status()
+
+            result = response.json().get("result", {})
+            prices.append(result.get("price_level"))
+
+            success = True
+            break
+        # gestión de errores
+        except requests.exceptions.RequestException as e:
+            print(f"Error ({attempt+1}/3): {e}")
+            time.sleep(2)
+
+    if not success:
+        prices.append(None)
+
+    time.sleep(0.2)
+
+# añadir precios
+for i in range(len(new_places)):
+    new_places[i]["price_level"] = prices[i]
+
+# guardar datos
+
+new_df = pd.DataFrame(new_places)
+final_df = pd.concat([existing_df, new_df], ignore_index=True)
+
+final_df.to_csv(FILE_NAME, index=False)
+
+# logging
+print("Ingesta incremental completada")
+print(f"Total registros: {len(final_df)}")
+print(f"Nuevos añadidos: {len(new_df)}")
